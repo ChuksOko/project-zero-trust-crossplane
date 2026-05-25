@@ -1,0 +1,108 @@
+services:
+  dev-node:
+    image: ubuntu:22.04
+    container_name: dev-node
+    hostname: dev-node
+    networks:
+      dev_network:
+        ipv4_address: 192.168.10.10
+    ports:
+      - "2222:22"
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - DEBIAN_FRONTEND=noninteractive
+    command: >
+      bash -c "
+        apt-get update -qq &&
+        apt-get install -y -qq openssh-server nmap net-tools iproute2 iputils-ping curl wget &&
+        echo 'root:weakpassword' | chpasswd &&
+        sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config &&
+        sed -i 's/PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config &&
+        echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config &&
+        mkdir -p /run/sshd &&
+        service ssh start &&
+        ip route add 192.168.20.0/24 via 192.168.10.1 2>/dev/null || true &&
+        echo 'Dev node ready' &&
+        tail -f /dev/null
+      "
+  router:
+    image: ubuntu:22.04
+    container_name: router
+    hostname: router
+    networks:
+      dev_network:
+        ipv4_address: 192.168.10.1
+      prod_network:
+        ipv4_address: 192.168.20.1
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    privileged: true
+    environment:
+      - DEBIAN_FRONTEND=noninteractive
+    command: >
+      bash -c "
+        apt-get update -qq &&
+        apt-get install -y -qq iptables iproute2 net-tools iputils-ping &&
+        sysctl -w net.ipv4.ip_forward=1 &&
+        iptables -P FORWARD ACCEPT &&
+        iptables -F FORWARD &&
+        iptables -t nat -A POSTROUTING -s 192.168.10.0/24 -o eth1 -j MASQUERADE &&
+        iptables -t nat -A POSTROUTING -s 192.168.20.0/24 -o eth0 -j MASQUERADE &&
+        echo 'Router ready - forwarding enabled' &&
+        tail -f /dev/null
+      "
+  prod-node:
+    image: ubuntu:22.04
+    container_name: prod-node
+    hostname: prod-node
+    networks:
+      prod_network:
+        ipv4_address: 192.168.20.10
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - DEBIAN_FRONTEND=noninteractive
+      - TZ=UTC
+    command: >
+      bash -c "
+        apt-get update -qq &&
+        apt-get install -y -qq postgresql net-tools iproute2 iputils-ping openssh-server &&
+        echo 'root:prodpassword' | chpasswd &&
+        sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config &&
+        echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config &&
+        mkdir -p /run/sshd &&
+        service ssh start &&
+        service postgresql start &&
+        sleep 5 &&
+        sudo -u postgres psql -c \"CREATE DATABASE customer_data;\" 2>/dev/null || true &&
+        sudo -u postgres psql -d customer_data -c \"CREATE TABLE IF NOT EXISTS users (id INT, name TEXT, ssn TEXT, account_number TEXT);\" &&
+        sudo -u postgres psql -d customer_data -c \"INSERT INTO users VALUES (1, 'John Doe', '123-45-6789', 'ACC-001-BANK');\" 2>/dev/null || true &&
+        sudo -u postgres psql -d customer_data -c \"INSERT INTO users VALUES (2, 'Jane Smith', '987-65-4321', 'ACC-002-BANK');\" 2>/dev/null || true &&
+        sed -i \"s/#listen_addresses = 'localhost'/listen_addresses = '*'/\" /etc/postgresql/*/main/postgresql.conf &&
+        echo 'host all all 0.0.0.0/0 trust' >> /etc/postgresql/*/main/pg_hba.conf &&
+        service postgresql restart &&
+        ip route add 192.168.10.0/24 via 192.168.20.1 2>/dev/null || true &&
+        echo 'Prod node ready' &&
+        tail -f /dev/null
+      "
+networks:
+  dev_network:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_icc: "true"
+      com.docker.network.bridge.enable_ip_masquerade: "true"
+    ipam:
+      config:
+        - subnet: 192.168.10.0/24
+          gateway: 192.168.10.254
+  prod_network:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_icc: "true"
+      com.docker.network.bridge.enable_ip_masquerade: "true"
+    ipam:
+      config:
+        - subnet: 192.168.20.0/24
+          gateway: 192.168.20.254
